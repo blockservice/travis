@@ -271,11 +271,10 @@ func (s *CmtRPCService) WithdrawCandidacy(args WithdrawCandidacyArgs) (*ctypes.R
 }
 
 type UpdateCandidacyArgs struct {
-	Nonce               *hexutil.Uint64   `json:"nonce"`
-	From                common.Address    `json:"from"`
-	MaxAmount           *hexutil.Big      `json:"maxAmount"`
-	Description         stake.Description `json:"description"`
-	NewCandidateAddress common.Address    `json:"newCandidateAddress"`
+	Nonce       *hexutil.Uint64   `json:"nonce"`
+	From        common.Address    `json:"from"`
+	MaxAmount   *hexutil.Big      `json:"maxAmount"`
+	Description stake.Description `json:"description"`
 }
 
 func (s *CmtRPCService) UpdateCandidacy(args UpdateCandidacyArgs) (*ctypes.ResultBroadcastTxCommit, error) {
@@ -283,7 +282,23 @@ func (s *CmtRPCService) UpdateCandidacy(args UpdateCandidacyArgs) (*ctypes.Resul
 	if args.MaxAmount != nil {
 		maxAmount = args.MaxAmount.ToInt().String()
 	}
-	tx := stake.NewTxUpdateCandidacy(maxAmount, args.Description, args.NewCandidateAddress)
+	tx := stake.NewTxUpdateCandidacy(maxAmount, args.Description)
+
+	txArgs, err := s.makeTravisTxArgs(tx, args.From, args.Nonce)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.signAndBroadcastTxCommit(txArgs)
+}
+
+type ActivateCandidacyArgs struct {
+	Nonce *hexutil.Uint64 `json:"nonce"`
+	From  common.Address  `json:"from"`
+}
+
+func (s *CmtRPCService) ActivateCandidacy(args ActivateCandidacyArgs) (*ctypes.ResultBroadcastTxCommit, error) {
+	tx := stake.NewTxActivateCandidacy()
 
 	txArgs, err := s.makeTravisTxArgs(tx, args.From, args.Nonce)
 	if err != nil {
@@ -311,15 +326,14 @@ func (s *CmtRPCService) SetCompRate(args SetCompRateArgs) (*ctypes.ResultBroadca
 	return s.signAndBroadcastTxCommit(txArgs)
 }
 
-type VerifyCandidacyArgs struct {
-	Nonce            *hexutil.Uint64 `json:"nonce"`
-	From             common.Address  `json:"from"`
-	CandidateAddress common.Address  `json:"candidateAddress"`
-	Verified         bool            `json:"verified"`
+type UpdateCandidacyAccountArgs struct {
+	Nonce               *hexutil.Uint64 `json:"nonce"`
+	From                common.Address  `json:"from"`
+	NewCandidateAddress common.Address  `json:"newCandidateAccount"`
 }
 
-func (s *CmtRPCService) VerifyCandidacy(args VerifyCandidacyArgs) (*ctypes.ResultBroadcastTxCommit, error) {
-	tx := stake.NewTxVerifyCandidacy(args.CandidateAddress, args.Verified)
+func (s *CmtRPCService) UpdateCandidacyAccount(args UpdateCandidacyAccountArgs) (*ctypes.ResultBroadcastTxCommit, error) {
+	tx := stake.NewTxUpdateCandidacyAccount(args.NewCandidateAddress)
 
 	txArgs, err := s.makeTravisTxArgs(tx, args.From, args.Nonce)
 	if err != nil {
@@ -329,13 +343,32 @@ func (s *CmtRPCService) VerifyCandidacy(args VerifyCandidacyArgs) (*ctypes.Resul
 	return s.signAndBroadcastTxCommit(txArgs)
 }
 
-type ActivateCandidacyArgs struct {
-	Nonce *hexutil.Uint64 `json:"nonce"`
-	From  common.Address  `json:"from"`
+type AcceptCandidacyAccountUpdateArgs struct {
+	Nonce                  *hexutil.Uint64 `json:"nonce"`
+	From                   common.Address  `json:"from"`
+	AccountUpdateRequestId int64           `json:"accountUpdateRequestId"`
 }
 
-func (s *CmtRPCService) ActivateCandidacy(args ActivateCandidacyArgs) (*ctypes.ResultBroadcastTxCommit, error) {
-	tx := stake.NewTxActivateCandidacy()
+func (s *CmtRPCService) AcceptCandidacyAccountUpdate(args AcceptCandidacyAccountUpdateArgs) (*ctypes.ResultBroadcastTxCommit, error) {
+	tx := stake.NewTxAcceptCandidacyAccountUpdate(args.AccountUpdateRequestId)
+
+	txArgs, err := s.makeTravisTxArgs(tx, args.From, args.Nonce)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.signAndBroadcastTxCommit(txArgs)
+}
+
+type VerifyCandidacyArgs struct {
+	Nonce            *hexutil.Uint64 `json:"nonce"`
+	From             common.Address  `json:"from"`
+	CandidateAddress common.Address  `json:"candidateAddress"`
+	Verified         bool            `json:"verified"`
+}
+
+func (s *CmtRPCService) VerifyCandidacy(args VerifyCandidacyArgs) (*ctypes.ResultBroadcastTxCommit, error) {
+	tx := stake.NewTxVerifyCandidacy(args.CandidateAddress, args.Verified)
 
 	txArgs, err := s.makeTravisTxArgs(tx, args.From, args.Nonce)
 	if err != nil {
@@ -499,15 +532,38 @@ func (s *CmtRPCService) ProposeDeployLibEni(args GovernanceDeployLibEniProposalA
 }
 
 type GovernanceRetireProgramProposalArgs struct {
-	Nonce              *hexutil.Uint64 `json:"nonce"`
-	From               common.Address  `json:"from"`
-	RetiredVersion     string          `json:"retiredVersion"`
-	Reason             string          `json:"reason"`
-	RetiredBlockHeight *int64          `json:"retiredBlockHeight"`
+	Nonce               *hexutil.Uint64 `json:"nonce"`
+	From                common.Address  `json:"from"`
+	PreservedValidators string          `json:"preservedValidators"`
+	Reason              string          `json:"reason"`
+	RetiredBlockHeight  *int64          `json:"retiredBlockHeight"`
 }
 
 func (s *CmtRPCService) ProposeRetireProgram(args GovernanceRetireProgramProposalArgs) (*ctypes.ResultBroadcastTxCommit, error) {
-	tx := governance.NewTxRetireProgramPropose(&args.From, args.RetiredVersion, args.Reason, args.RetiredBlockHeight)
+	tx := governance.NewTxRetireProgramPropose(&args.From, args.PreservedValidators, args.Reason, args.RetiredBlockHeight)
+
+	txArgs, err := s.makeTravisTxArgs(tx, args.From, args.Nonce)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.signAndBroadcastTxCommit(txArgs)
+}
+
+type GovernanceUpgradeProgramProposalArgs struct {
+	Nonce              *hexutil.Uint64 `json:"nonce"`
+	From               common.Address  `json:"from"`
+	Name               string          `json:"name"`
+	Version            string          `json:"version"`
+	FileUrl            string          `json:"fileUrl"`
+	Md5                string          `json:"md5"`
+	Reason             string          `json:"reason"`
+	UpgradeBlockHeight *int64          `json:"upgradeBlockHeight"`
+}
+
+func (s *CmtRPCService) ProposeUpgradeProgram(args GovernanceUpgradeProgramProposalArgs) (*ctypes.ResultBroadcastTxCommit, error) {
+	tx := governance.NewTxUpgradeProgramPropose(&args.From, args.Name,
+		args.Version, args.FileUrl, args.Md5, args.Reason, args.UpgradeBlockHeight)
 
 	txArgs, err := s.makeTravisTxArgs(tx, args.From, args.Nonce)
 	if err != nil {

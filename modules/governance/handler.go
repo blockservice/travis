@@ -3,6 +3,7 @@ package governance
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"strings"
 	"time"
@@ -13,9 +14,12 @@ import (
 	"github.com/CyberMiles/travis/sdk/state"
 	"github.com/CyberMiles/travis/types"
 	"github.com/CyberMiles/travis/utils"
+	"github.com/CyberMiles/travis/version"
 	"github.com/ethereum/go-ethereum/common"
 	ethState "github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/vm/eni"
+	"net/rpc"
+
 )
 
 // nolint
@@ -95,7 +99,7 @@ func CheckTx(ctx types.Context, store state.SimpleDB,
 		}
 
 		// Transfer gasFee
-		gasFee, err := checkGasFee(app_state, sender, utils.GetParams().TransferFundProposal)
+		gasFee, err := checkGasFee(app_state, sender, utils.GetParams().TransferFundProposalGas)
 		if err != nil {
 			return sdk.NewCheck(0, ""), err
 		}
@@ -136,7 +140,7 @@ func CheckTx(ctx types.Context, store state.SimpleDB,
 		}
 
 		// Transfer gasFee
-		gasFee, err := checkGasFee(app_state, sender, utils.GetParams().ChangeParamsProposal)
+		gasFee, err := checkGasFee(app_state, sender, utils.GetParams().ChangeParamsProposalGas)
 		if err != nil {
 			return sdk.NewCheck(0, ""), err
 		}
@@ -207,7 +211,7 @@ func CheckTx(ctx types.Context, store state.SimpleDB,
 		}
 
 		// Transfer gasFee
-		gasFee, err := checkGasFee(app_state, sender, utils.GetParams().DeployLibEniProposal)
+		gasFee, err := checkGasFee(app_state, sender, utils.GetParams().DeployLibEniProposalGas)
 		if err != nil {
 			return sdk.NewCheck(0, ""), err
 		}
@@ -229,16 +233,68 @@ func CheckTx(ctx types.Context, store state.SimpleDB,
 			}
 		}
 
+		rp := GetRetiringProposal(version.Version)
+		if rp != nil {
+			return sdk.NewCheck(0, ""), ErrOngoingRetiringFound()
+		}
+
+		if txInner.PreservedValidators == "" {
+			return sdk.NewCheck(0, ""), ErrInvalidParameter()
+		}
+
 		if txInner.ExpireBlockHeight != nil && ctx.BlockHeight() >= *txInner.ExpireBlockHeight {
 			return sdk.NewCheck(0, ""), ErrInvalidExpireBlockHeight()
 		}
 
-		if txInner.RetiredVersion == "" {
-			return sdk.NewCheck(0, ""), ErrInvalidParameter()
+		// Transfer gasFee
+		gasFee, err := checkGasFee(app_state, sender, utils.GetParams().RetireProgramProposalGas)
+		if err != nil {
+			return sdk.NewCheck(0, ""), err
+		}
+		app_state.SubBalance(sender, gasFee.Int)
+	case TxUpgradeProgramPropose:
+		if txInner.Proposer == nil || !bytes.Equal(txInner.Proposer.Bytes(), sender.Bytes()) {
+			return sdk.NewCheck(0, ""), ErrMissingSignature()
+		}
+		validators := stake.GetCandidates().Validators()
+		if validators == nil || validators.Len() == 0 {
+			return sdk.NewCheck(0, ""), ErrInvalidValidator()
+		}
+		for i, v := range validators {
+			if v.OwnerAddress == txInner.Proposer.String() {
+				break
+			}
+			if i+1 == len(validators) {
+				return sdk.NewCheck(0, ""), ErrInvalidValidator()
+			}
+		}
+
+		if txInner.ExpireBlockHeight != nil && ctx.BlockHeight() >= *txInner.ExpireBlockHeight {
+			return sdk.NewCheck(0, ""), ErrInvalidExpireBlockHeight()
+		}
+
+		var fileurlJson map[string][]string
+
+		if err = json.Unmarshal([]byte(txInner.Fileurl), &fileurlJson); err != nil {
+			return sdk.NewCheck(0, ""), ErrInvalidFileurlJson()
+		}
+
+		if _, ok := fileurlJson[utils.GOOSDIST]; !ok {
+			return sdk.NewCheck(0, ""), ErrNoFileurl()
+		}
+
+		var md5Json map[string]string
+
+		if err = json.Unmarshal([]byte(txInner.Md5), &md5Json); err != nil {
+			return sdk.NewCheck(0, ""), ErrInvalidMd5Json()
+		}
+
+		if _, ok := md5Json[utils.GOOSDIST]; !ok {
+			return sdk.NewCheck(0, ""), ErrNoMd5()
 		}
 
 		// Transfer gasFee
-		gasFee, err := checkGasFee(app_state, sender, utils.GetParams().RetireProgramProposal)
+		gasFee, err := checkGasFee(app_state, sender, utils.GetParams().UpgradeProgramProposalGas)
 		if err != nil {
 			return sdk.NewCheck(0, ""), err
 		}
@@ -265,6 +321,11 @@ func CheckTx(ctx types.Context, store state.SimpleDB,
 		if proposal == nil {
 			return sdk.NewCheck(0, ""), ErrInvalidParameter()
 		}
+
+		if proposal.ExpireBlockHeight > 0 && ctx.BlockHeight() >= proposal.ExpireBlockHeight - 2 {
+			return sdk.NewCheck(0, ""), ErrExpirationTooClose()
+		}
+
 		if proposal.ResultBlockHeight != 0 {
 			if proposal.Result == "Approved" {
 				return sdk.NewCheck(0, ""), ErrApprovedProposal()
@@ -328,7 +389,7 @@ func DeliverTx(ctx types.Context, store state.SimpleDB,
 			return res, err
 		}
 		params := utils.GetParams()
-		gasUsed := params.TransferFundProposal
+		gasUsed := params.TransferFundProposalGas
 
 		if gasFee, err := checkGasFee(app_state, sender, gasUsed); err != nil {
 			return res, err
@@ -373,7 +434,7 @@ func DeliverTx(ctx types.Context, store state.SimpleDB,
 			return res, err
 		}
 		params := utils.GetParams()
-		gasUsed := params.ChangeParamsProposal
+		gasUsed := params.ChangeParamsProposalGas
 
 		if gasFee, err := checkGasFee(app_state, sender, gasUsed); err != nil {
 			return res, err
@@ -421,7 +482,7 @@ func DeliverTx(ctx types.Context, store state.SimpleDB,
 			return res, err
 		}
 		params := utils.GetParams()
-		gasUsed := params.DeployLibEniProposal
+		gasUsed := params.DeployLibEniProposalGas
 
 		if gasFee, err := checkGasFee(app_state, sender, gasUsed); err != nil {
 			return res, err
@@ -449,7 +510,8 @@ func DeliverTx(ctx types.Context, store state.SimpleDB,
 			string(hashJson[1:len(hashJson)-1]),
 			txInner.Proposer,
 			ctx.BlockHeight(),
-			txInner.RetiredVersion,
+			version.Version,
+			txInner.PreservedValidators,
 			txInner.Reason,
 			expireBlockHeight,
 		)
@@ -462,7 +524,50 @@ func DeliverTx(ctx types.Context, store state.SimpleDB,
 			return res, err
 		}
 		params := utils.GetParams()
-		gasUsed := params.RetireProgramProposal
+		gasUsed := params.RetireProgramProposalGas
+
+		if gasFee, err := checkGasFee(app_state, sender, gasUsed); err != nil {
+			return res, err
+		} else {
+			res.GasFee = gasFee.Int
+			res.GasUsed = int64(gasUsed)
+			// transfer gasFee
+			commons.Transfer(sender, utils.HoldAccount, gasFee)
+		}
+		// Check gasFee  -- end
+
+		// check ahead one block
+		utils.PendingProposal.Add(cp.Id, cp.ExpireTimestamp, cp.ExpireBlockHeight - 1)
+
+		res.Data = hash
+	case TxUpgradeProgramPropose:
+		expireBlockHeight := ctx.BlockHeight() + int64(utils.GetParams().ProposalExpirePeriod)
+		if txInner.ExpireBlockHeight != nil {
+			expireBlockHeight = *txInner.ExpireBlockHeight
+		}
+		hashJson, _ := json.Marshal(hash)
+		cp := NewUpgradeProgramProposal(
+			string(hashJson[1:len(hashJson)-1]),
+			txInner.Proposer,
+			ctx.BlockHeight(),
+			version.Version,
+			txInner.Name,
+			txInner.Version,
+			txInner.Fileurl,
+			txInner.Md5,
+			txInner.Reason,
+			expireBlockHeight,
+		)
+		SaveProposal(cp)
+
+		// Check gasFee  -- start
+		// get the sender
+		sender, err := getTxSender(ctx)
+		if err != nil {
+			return res, err
+		}
+		params := utils.GetParams()
+		gasUsed := params.UpgradeProgramProposalGas
 
 		if gasFee, err := checkGasFee(app_state, sender, gasUsed); err != nil {
 			return res, err
@@ -475,8 +580,9 @@ func DeliverTx(ctx types.Context, store state.SimpleDB,
 		// Check gasFee  -- end
 
 		utils.PendingProposal.Add(cp.Id, cp.ExpireTimestamp, cp.ExpireBlockHeight)
-
 		res.Data = hash
+
+		DownloadProgramCmd(cp)
 
 	case TxVote:
 		var vote *Vote
@@ -539,6 +645,14 @@ func DeliverTx(ctx types.Context, store state.SimpleDB,
 				ProposalReactor{proposal.Id, ctx.BlockHeight(), "Rejected"}.React("success", "")
 			}
 		case RETIRE_PROGRAM_PROPOSAL:
+			switch checkResult {
+			case "approved":
+				ProposalReactor{proposal.Id, ctx.BlockHeight(), "Approved"}.React("success", "")
+			case "rejected":
+				utils.PendingProposal.Del(proposal.Id)
+				ProposalReactor{proposal.Id, ctx.BlockHeight(), "Rejected"}.React("success", "")
+			}
+		case UPGRADE_PROGRAM_PROPOSAL:
 			switch checkResult {
 			case "approved":
 				ProposalReactor{proposal.Id, ctx.BlockHeight(), "Approved"}.React("success", "")
@@ -609,7 +723,6 @@ type ProposalReactor struct {
 }
 
 func (pr ProposalReactor) React(result, msg string) {
-	now := utils.GetNow()
 	if result == "success" {
 		// If the default result is not set, then do nothing
 		if pr.Result == "" {
@@ -617,7 +730,7 @@ func (pr ProposalReactor) React(result, msg string) {
 		}
 		result = pr.Result
 	}
-	UpdateProposalResult(pr.ProposalId, result, msg, pr.BlockHeight, now)
+	UpdateProposalResult(pr.ProposalId, result, msg, pr.BlockHeight)
 }
 
 // get the sender from the ctx and ensure it matches the tx pubkey
@@ -698,7 +811,7 @@ func DownloadLibEni(p *Proposal) {
 			if r, ok := cancelDownload[p.Id]; ok {
 				delete(cancelDownload, p.Id)
 				if r {
-					UpdateDeployLibEniStatus(p.Id, "failed, but proposal has been approved")
+					UpdateDeployLibEniStatus(p.Id, "collapsed") // failed, but proposal has been approved
 				} else {
 					UpdateDeployLibEniStatus(p.Id, "failed")
 				}
@@ -745,4 +858,59 @@ func DestroyLibEni(p *Proposal) {
 		return
 	}
 	OTAInstance.Destroy(*oi)
+}
+
+// KilProgramCmd kill the process from internal
+func KillProgramCmd(p *Proposal) error {
+	info := &types.CmdInfo{}
+	reply := &types.MonitorResponse{}
+	err := callRpc("Monitor.Kill", info, reply)
+	if err != nil {
+		//log.Fatal("call monitor rpc error:", err)
+		return err
+	}
+	return nil
+}
+
+// DownloadProgramCmd download new program version
+func DownloadProgramCmd(p *Proposal) error {
+	oi := getOTAInfo(p)
+	if oi == nil {
+		return errors.New("unknown error")
+	}
+	info := &types.CmdInfo{Name: oi.LibName, Version: oi.Version, DownloadURLs:oi.Url, MD5: oi.Checksum}
+	reply := &types.MonitorResponse{}
+	err := callRpc("Monitor.Download", info, reply)
+	if err != nil {
+		//log.Fatal("call monitor rpc error:", err)
+		return err
+	}
+	return nil
+}
+
+// UpgradeProgramCmd upgrade new program version
+func UpgradeProgramCmd(p *Proposal) error {
+	oi := getOTAInfo(p)
+	if oi == nil {
+		return errors.New("unknown error")
+	}
+	info := &types.CmdInfo{Name: oi.LibName, Version: oi.Version, DownloadURLs:oi.Url, MD5: oi.Checksum}
+	reply := &types.MonitorResponse{}
+	err := callRpc("Monitor.Upgrade", info, reply)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func callRpc(serviceMethod string, info *types.CmdInfo, reply *types.MonitorResponse) error {
+	client, err := rpc.DialHTTP("tcp", "127.0.0.1:26650")
+	if err != nil {
+		return err
+	}
+	err = client.Call(serviceMethod, info, reply)
+	if err != nil {
+		return err
+	}
+	return nil
 }
